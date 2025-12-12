@@ -1,0 +1,27 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pea_cockpit"
+version = "0.1.0"
+description = "A local, privacy-focused Web UI for French PEA equities."
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "Arthur Duvivier", email = "arthur_379@hotmail.com"},
+]
+# Core Runtime Dependencies
+dependencies = [
+    "streamlit",
+    "pandas",
+    "duckdb",
+    "yfinance",
+    "plotly",
+    "beautifulsoup4",
+    "lxml",
+]
+
+[tool.uv]

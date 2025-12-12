@@ -1,0 +1,15 @@
+# docker-compose.yml
+services:
+  peacockpit_app:
+    build: .
+    container_name: pea_cockpit_app
+    # Map container port 8501 to host port 8501
+    ports:
+      - "8501:8501"
+    # Mount volumes for persistent data and live code updates (dev friendly)
+    volumes:
+      - ./data:/app/data  # Keep the database file outside the container
+      - ./src:/app/src    # Live code editing for src/
+      - ./app.py:/app/app.py
+    # Optional: To run the fetcher once on startup instead of Streamlit
+    # command: python src/fetcher.py

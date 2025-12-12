@@ -1,0 +1,13 @@
+# Python environment
+.venv/
+__pycache__/
+
+# DuckDB/Data
+data/*.duckdb
+data/*.csv
+
+# IDE Specific Files (JetBrains)
+.idea/
+
+# Streamlit specifics
+.streamlit/
