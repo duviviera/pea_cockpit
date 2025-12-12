@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import duckdb
 import os
-from typing import List, Optional
+from typing import List, Optional, Union
 
 # --- Configuration ---
 DB_FILE = 'data/stock_analysis.duckdb'
@@ -22,7 +22,6 @@ def get_db_connection() -> duckdb.DuckDBPyConnection:
 def init_db():
     """Initializes the required tables if they don't exist."""
     conn = get_db_connection()
-    # 1. Create the data directory if it doesn't exist (important for Docker mount)
     if not os.path.exists('data'):
         os.makedirs('data')
 
@@ -45,7 +44,24 @@ def init_db():
             PRIMARY KEY (ticker_id, date)
         );
     """)
+    # --- NEW: Dividends Table ---
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dividends (
+            ticker_id VARCHAR,
+            date DATE,
+            amount DOUBLE,
+            PRIMARY KEY (ticker_id, date)
+        );
+    """)
 
+def get_db_counts():
+
+    conn = get_db_connection()
+    ticker_count = len(get_ticker_details())
+    historical_count = conn.execute("SELECT COUNT(*) FROM historical_data;").fetchone()[0]
+    dividend_count = conn.execute("SELECT COUNT(*) FROM dividends;").fetchone()[0]
+
+    return ticker_count, historical_count, dividend_count
 
 # --- Ticker Management Functions ---
 
@@ -140,45 +156,282 @@ def add_ticker_to_db_and_csv(ticker_id: str, name: str, icb_sector: str) -> bool
         return False
 
 
-# --- Historical Data Insertion (for use by fetcher.py) ---
+# --- Historical Data Insertion ---
 
 def get_global_min_start_date() -> str:
     """
-    Finds the single earliest date we need to fetch data for across all tickers.
-    This is the day AFTER the oldest MAX(date) among all tickers that have data.
-    If historical_data table is empty, returns the GLOBAL_DEFAULT_START_DATE.
+    Finds the earliest missing date across all tickers in BOTH price and dividend tables.
+    This sets the start date for the next bulk fetch.
     """
     conn = get_db_connection()
-    # Find the OLDEST MAX(date) across all tickers that have data.
-    query = """
-    SELECT MIN(max_date) FROM (
-        SELECT MAX(date) as max_date 
-        FROM historical_data 
-        GROUP BY ticker_id
-    );
+
+    def get_latest_date_in_table(table_name: str) -> Optional[str]:
+        """Helper to find the minimum of the latest dates across all tickers in a table."""
+        try:
+            # Find the max date for each ticker, then take the minimum of those maximums
+            latest_date_across_all = conn.execute(f"""
+                SELECT MIN(max_date)
+                FROM (
+                    SELECT MAX(date) AS max_date
+                    FROM {table_name}
+                    FROM tickers
+                    WHERE ticker_id IN (SELECT DISTINCT ticker_id FROM {table_name})
+                    GROUP BY ticker_id
+                );
+            """).fetchone()[0]
+            return latest_date_across_all
+        except Exception:
+            # Catches error if table is completely empty or non-existent
+            return None
+
+    latest_price_date = get_latest_date_in_table('historical_data')
+    latest_dividend_date = get_latest_date_in_table('dividends')
+
+    # Default start date (if a table is empty, or no data exists)
+    default_start_date = pd.to_datetime(GLOBAL_DEFAULT_START_DATE).date()
+
+    # Determine the required start date for each type
+    def calculate_start_date(latest_db_date):
+        if latest_db_date is None:
+            # If table is empty, start from the absolute beginning
+            return default_start_date
+        else:
+            # Start date is the day AFTER the latest date found
+            return (pd.to_datetime(latest_db_date) + pd.Timedelta(days=1)).date()
+
+    start_date_prices = calculate_start_date(latest_price_date)
+    start_date_dividends = calculate_start_date(latest_dividend_date)
+
+    # We must fetch from the EARLIEST required start date
+    earliest_start_date = min(start_date_prices, start_date_dividends)
+
+    return earliest_start_date.strftime('%Y-%m-%d')
+
+
+def insert_historical_data(historical_df: pd.DataFrame) -> str:
     """
-    result = conn.execute(query).fetchone()
+    Inserts historical price data into the DuckDB 'historical_data' table.
+    """
+    # 1. Get the cached connection
+    conn = get_db_connection()
 
-    if result and result[0] is not None:
-        # The date found is the OLDEST last update date. We start the fetch the day after.
-        oldest_max_date = pd.to_datetime(result[0])
-        start_date = oldest_max_date + pd.Timedelta(days=1)
-        return start_date.strftime('%Y-%m-%d')
+    if historical_df.empty:
+        return "No new historical data to insert."
 
-    # If table is empty, use the defined historical start date
-    return GLOBAL_DEFAULT_START_DATE
+    # Validate/prepare DataFrame columns (Ensures column order and names are correct)
+    required_cols = ['ticker_id', 'date', 'open', 'high', 'low', 'close', 'volume']
+    if list(historical_df.columns) != required_cols:
+        raise ValueError(f"DataFrame columns must match the schema: {required_cols}")
 
-def insert_historical_data(df: pd.DataFrame) -> int:
-    """Inserts historical stock data into the historical_data table."""
-    if df.empty:
-        return 0
+    rows_to_insert = len(historical_df)
+    initial_row_count = conn.execute("SELECT count(*) FROM historical_data").fetchone()[0]
 
     try:
-        conn = get_db_connection()
+        conn.execute("BEGIN TRANSACTION")
+
+        # --- A. Register DataFrame as a temporary view/table ---
+        conn.register('temp_new_prices', historical_df)  # Use the whole DF
+
+        # --- B. Perform the Insert with Duplicate Check ---
+        # *** TABLE NAME IS CORRECTED HERE ***
+        conn.execute("""
+            INSERT INTO historical_data
+            SELECT * FROM temp_new_prices AS tnp
+            WHERE NOT EXISTS (
+                SELECT 1 
+                FROM historical_data AS p
+                WHERE p.ticker_id = tnp.ticker_id 
+                  AND p.date = tnp.date
+            );
+        """)
+
+        # --- C. Cleanup and Commit ---
+        conn.unregister('temp_new_prices')
         conn.execute("COMMIT")
-        return len(df)
+
+        # 3. Calculate and return the actual number of inserted rows
+        final_row_count = conn.execute("SELECT count(*) FROM historical_data").fetchone()[0]
+        actual_inserted_rows = final_row_count - initial_row_count
+
+        return (f"Successfully processed {rows_to_insert} rows. "
+                f"Inserted {actual_inserted_rows} new rows into historical_data.")
+
+    except Exception as e:
+        # 4. Handle Error and Rollback
+        print(f"Transaction failed. Rolling back changes. Error: {e}")
+        conn.execute("ROLLBACK")
+        raise
+
+
+# --- Dividend Data Insertion ---
+
+def insert_dividends_data(dividends_df: pd.DataFrame) -> str:
+    """
+    Inserts dividend data into the DuckDB 'dividends' table.
+    Expects DataFrame cols: [ticker_id, date, amount]
+    """
+    conn = get_db_connection()
+
+    if dividends_df.empty:
+        return "No new dividend data to insert."
+
+    required_cols = ['ticker_id', 'date', 'amount']
+    if list(dividends_df.columns) != required_cols:
+        # Map columns if they are slightly off, or raise error
+        raise ValueError(f"Dividend DataFrame columns must match: {required_cols}")
+
+    rows_to_insert = len(dividends_df)
+    initial_row_count = conn.execute("SELECT count(*) FROM dividends").fetchone()[0]
+
+    try:
+        conn.execute("BEGIN TRANSACTION")
+
+        conn.register('temp_new_dividends', dividends_df)
+
+        # Insert only if (ticker_id, date) doesn't exist
+        conn.execute("""
+            INSERT INTO dividends
+            SELECT * FROM temp_new_dividends AS tnd
+            WHERE NOT EXISTS (
+                SELECT 1 
+                FROM dividends AS d
+                WHERE d.ticker_id = tnd.ticker_id 
+                  AND d.date = tnd.date
+            );
+        """)
+
+        conn.unregister('temp_new_dividends')
+        conn.execute("COMMIT")
+
+        final_row_count = conn.execute("SELECT count(*) FROM dividends").fetchone()[0]
+        actual_inserted = final_row_count - initial_row_count
+
+        return f"Processed {rows_to_insert} dividend records. Inserted {actual_inserted} new."
 
     except Exception as e:
         conn.execute("ROLLBACK")
-        st.error(f"Error inserting historical data: {e}")
-        return 0
+        print(f"Dividend Transaction failed: {e}")
+        raise e
+
+# --- Data Retrieval ---
+
+def get_ticker_metadata(ticker_id: str) -> dict:
+    """Fetches static metadata (name, sector, yield) for a ticker."""
+    conn = get_db_connection()
+
+    # Assuming 'yield' and 'icb_sector' are in the 'tickers' table
+    query = f"""
+        SELECT name, icb_sector 
+        FROM tickers
+        WHERE ticker_id = '{ticker_id}';
+    """
+    metadata = conn.execute(query).fetchone()
+
+    if metadata:
+        return {"name": metadata[0], "sector": metadata[1]}
+    return {}
+
+def get_ticker_dividends(ticker_id: str) -> pd.DataFrame:
+    """Fetches dividend history for a specific ticker."""
+    conn = get_db_connection()
+    query = f"""
+        SELECT date, amount 
+        FROM dividends 
+        WHERE ticker_id = '{ticker_id}' 
+        ORDER BY date ASC
+    """
+    df = conn.execute(query).fetchdf()
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+    return df
+
+
+def get_historical_prices_data(
+        tickers: Union[str, List[str]],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Fetches historical price data for one or more tickers within an optional date range.
+
+    Returns a DataFrame with MultiIndex (date, ticker_id) suitable for analysis.
+    """
+    conn = get_db_connection()
+
+    # Ensure tickers is a list
+    if isinstance(tickers, str):
+        tickers = [tickers]
+
+    if not tickers:
+        return pd.DataFrame()
+
+    ticker_list_str = ', '.join(f"'{t}'" for t in tickers)
+
+    date_filter = ""
+    if start_date:
+        date_filter += f" AND date >= '{start_date}'"
+    if end_date:
+        date_filter += f" AND date <= '{end_date}'"
+
+    query = f"""
+        SELECT ticker_id, date, open, high, low, close, volume 
+        FROM historical_data 
+        WHERE ticker_id IN ({ticker_list_str})
+        {date_filter}
+        ORDER BY date ASC;
+    """
+
+    df = conn.execute(query).fetchdf()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df['date'] = pd.to_datetime(df['date'])
+    # MultiIndex is essential for bulk analysis (Comparator)
+    df.set_index(['date', 'ticker_id'], inplace=True)
+
+    return df.sort_index()
+
+
+def get_dividends_data(
+        tickers: Union[str, List[str]],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Fetches dividend data for one or more tickers within an optional date range.
+
+    Returns a DataFrame with MultiIndex (date, ticker_id).
+    """
+    conn = get_db_connection()
+
+    if isinstance(tickers, str):
+        tickers = [tickers]
+
+    if not tickers:
+        return pd.DataFrame()
+
+    ticker_list_str = ', '.join(f"'{t}'" for t in tickers)
+
+    date_filter = ""
+    if start_date:
+        date_filter += f" AND date >= '{start_date}'"
+    if end_date:
+        date_filter += f" AND date <= '{end_date}'"
+
+    query = f"""
+        SELECT ticker_id, date, amount 
+        FROM dividends 
+        WHERE ticker_id IN ({ticker_list_str})
+        {date_filter}
+        ORDER BY date ASC;
+    """
+    df = conn.execute(query).fetchdf()
+    if df.empty:
+        return pd.DataFrame()
+
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index(['date', 'ticker_id'], inplace=True)
+
+    return df.sort_index()

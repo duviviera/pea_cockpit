@@ -22,6 +22,7 @@ dependencies = [
     "plotly",
     "beautifulsoup4",
     "lxml",
+    "matplotlib>=3.10.8",
 ]
 
 [tool.uv]
