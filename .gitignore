@@ -3,8 +3,7 @@
 __pycache__/
 
 # DuckDB/Data
-data/*.duckdb
-data/*.csv
+data/
 
 # IDE Specific Files (JetBrains)
 .idea/

@@ -319,7 +319,6 @@ def get_ticker_metadata(ticker_id: str) -> dict:
     """Fetches static metadata (name, sector, yield) for a ticker."""
     conn = get_db_connection()
 
-    # Assuming 'yield' and 'icb_sector' are in the 'tickers' table
     query = f"""
         SELECT name, icb_sector 
         FROM tickers

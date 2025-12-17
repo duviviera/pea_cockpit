@@ -2,179 +2,187 @@ import streamlit as st
 import pandas as pd
 import datetime
 from src.database import get_all_ticker_ids, get_historical_prices_data, get_ticker_metadata
-from src.analysis import calculate_time_series_indicators, calculate_ytd_return, calculate_dividend_indicators, \
-    get_normalized_comparison
-from src.charts import plot_candlestick_chart, plot_comparison_chart
+from src.analysis import (
+    calculate_time_series_indicators,
+    calculate_ytd_return,
+    calculate_dividend_indicators,
+    get_normalized_comparison,
+    calculate_single_ticker_summary,
+    get_comparison_performance_data,
+    calculate_yearly_evolution,  # NEW
+    calculate_sector_rankings  # NEW
+)
+from src.charts import (
+    plot_candlestick_chart,
+    plot_comparison_chart,
+    plot_force_comparison_chart,
+    plot_evolution_bar_chart  # NEW
+)
 
 
+# --- Utility Functions for Ticker Handling ---
+def clean_ticker_id(ticker_id: str) -> str:
+    return ticker_id.upper().replace('.PA', '').strip()
+
+
+def get_yf_ticker_id(clean_id: str) -> str:
+    if '.' not in clean_id and clean_id.isalpha():
+        return f"{clean_id}.PA"
+    return clean_id
+
+
+# --- Page Setup ---
 st.set_page_config(layout="wide", page_title="Analysis Dashboard")
 st.title("📈 Stock Analysis Dashboard")
 
-# --- 1. Sidebar Controls ---
-all_tickers = get_all_ticker_ids()
-if not all_tickers:
+# --- 1. Data Preparation and Sidebar Controls ---
+all_tickers_raw = get_all_ticker_ids()
+
+if not all_tickers_raw:
     st.warning("⚠️ No tickers found in the database. Please go to the 'Data Management' page to load or fetch data.")
     st.stop()
 
+all_tickers_clean = [clean_ticker_id(t) for t in all_tickers_raw]
+default_clean_ticker = all_tickers_clean[0]
 max_date = datetime.date.today()
 
 with st.sidebar:
-    st.header("Single Ticker Analysis")
-    selected_ticker = st.selectbox("Select Ticker", options=all_tickers)
-
+    st.header("Analysis Controls")
+    selected_ticker_clean = st.selectbox("Select Primary Ticker", options=all_tickers_clean,
+                                         index=all_tickers_clean.index(default_clean_ticker))
+    comparison_options = [t for t in all_tickers_clean if t != selected_ticker_clean]
+    comparison_tickers_clean = st.multiselect("Select Tickers for Comparison", options=comparison_options,
+                                              default=comparison_options[0] if comparison_options else [])
+    comparison_period = st.slider("Comparison Period (Trading Days)", min_value=90, max_value=365, value=252, step=30)
+    st.markdown("---")
     st.header("Chart Period Selection")
-
-    # --- Start and End Date Inputs (New Feature) ---
-    # Define a default start date (e.g., 1 year ago)
     default_start_date = max_date - datetime.timedelta(days=365)
-
-    start_date = st.date_input(
-        "Start Date",
-        value=default_start_date,
-        max_value=max_date,
-    )
-
-    end_date = st.date_input(
-        "End Date",
-        value=max_date,
-        min_value=start_date,  # Ensures a valid range
-        max_value=max_date
-    )
-
-    # Validation
+    start_date = st.date_input("Start Date", value=default_start_date, max_value=max_date)
+    end_date = st.date_input("End Date", value=max_date, min_value=start_date, max_value=max_date)
     if start_date > end_date:
-        st.error("Error: Start date cannot be after end date. Please adjust your selection.")
+        st.error("Error: Start date cannot be after end date.")
         st.stop()
-
     st.markdown("---")
-    st.header("Comparison Tool")
-    comparison_tickers = st.multiselect(
-        "Select Tickers for Comparison",
-        options=[t for t in all_tickers],
-        default=[all_tickers[0]] if len(all_tickers) > 0 else []
-    )
-    comparison_period = st.slider("Comparison Period (Days)", min_value=30, max_value=730, value=180, step=30)
+    st.info("Use the **⚙️ Data Management** page to load new tickers.")
 
-    st.markdown("---")
-    st.info("Use the **⚙️ Data Management** page to load new tickers and fetch data.")
+selected_ticker_yf = get_yf_ticker_id(selected_ticker_clean)
+comparison_tickers_yf = [get_yf_ticker_id(t) for t in comparison_tickers_clean]
 
 # --- 2. Single Ticker Analysis Tab ---
 tab_single, tab_comp = st.tabs(["🚀 Single Ticker Analysis", "⚖️ Comparison Analysis"])
 
 with tab_single:
-    # 1. Fetch data and metadata using the YF format
-    historical_mi = get_historical_prices_data(selected_ticker)
+    # 1. Fetch all required data
+    historical_mi = get_historical_prices_data(selected_ticker_yf)
 
     if historical_mi.empty:
-        st.error(f"No historical price data found for {selected_ticker.split('.')[0]}.")
+        st.error(f"No historical price data found for {selected_ticker_yf}.")
     else:
         # Data preparation
         historical_df = historical_mi.droplevel('ticker_id')
-
-        # Ensure the index is a DatetimeIndex
         historical_df.index = pd.to_datetime(historical_df.index)
 
-        metadata = get_ticker_metadata(selected_ticker)
+        metadata = get_ticker_metadata(selected_ticker_yf)
+        company_name = metadata.get('name', 'N/A')
+        sector = metadata.get('sector', 'N/A')
         current_price = historical_df['close'].iloc[-1] if not historical_df.empty else 0.0
 
-        # 2. Calculate indicators
+        # 2. Calculate core metrics
         analyzed_df = calculate_time_series_indicators(historical_df)
         ytd_return = calculate_ytd_return(analyzed_df)
-        div_metrics = calculate_dividend_indicators(selected_ticker, current_price)
+        div_metrics = calculate_dividend_indicators(selected_ticker_yf, current_price)
+        summary_metrics = calculate_single_ticker_summary(analyzed_df, current_price, selected_ticker_yf,
+                                                          comparison_period)
 
-        # --- Metrics Display ---
-        # Display full YF ticker ID and company name
-        st.header(f"Details for {selected_ticker.split('.')[0]} - {metadata.get('name', 'N/A')}")
+        # Calculate Ranks
+        ranks = calculate_sector_rankings(selected_ticker_yf, sector)
 
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # Calculate Evolution Data
+        evolution_df = calculate_yearly_evolution(selected_ticker_yf, historical_df)
 
-        col1.metric("Current Close", f"€{current_price:,.2f}")
-        col2.metric("YTD Return", f"{ytd_return * 100:,.2f}%")
-        col3.metric("Sector", metadata.get('icb_sector', 'N/A'))
-        col4.metric("TTM Dividend Yield", f"{div_metrics['yield_ttm'] * 100:,.2f}%")
-        col5.metric("5Y Dividend CAGR", f"{div_metrics['cagr_5y'] * 100:,.2f}%")
+        st.subheader(f"Details for {selected_ticker_yf} - {company_name}")
+
+        # --- 1. Combined Data Table (Updated with Momentum Score/Rank) ---
+        overview_data = {
+            "Sector": [sector],
+            "Current Price": [f"€{current_price:,.2f}"],
+            "Div Yield (TTM)": [f"{div_metrics['yield_ttm'] * 100:,.2f}%"],
+            "Sector Rank (Yield)": [ranks["yield_rank"]],
+            "1Y Volatility": [f"{summary_metrics['Volatility_1Y'] * 100:,.2f}%"],
+            "YTD Return": [f"{ytd_return * 100:,.2f}%"],
+            "1Y Return": [f"{summary_metrics['Return_1Y'] * 100:,.2f}%"],
+            "Sector Rank (Perf)": [ranks["perf_rank"]],
+            "Sector Rank (Momentum)": [ranks["momentum_rank"]]
+        }
+
+        df_overview = pd.DataFrame(overview_data)
+
+        st.dataframe(
+            df_overview,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Sector": st.column_config.TextColumn("Sector", width="medium"),
+                "Sector Rank (Perf)": st.column_config.TextColumn("Sector Rank (Perf)", help="Ranked by 1Y Return in Sector"),
+                "Sector Rank (Yield)": st.column_config.TextColumn("Sector Rank (Yield)",
+                                                                   help="Ranked by TTM Yield in Sector"),
+                "Sector Rank (Momentum)": st.column_config.TextColumn("Sector Rank (Momentum)",
+                                                             help="Ranked by Momentum Score in Sector. Higher Z-Score is better.")
+            }
+        )
 
         st.markdown("---")
 
-        # --- Candlestick Chart with Date Filtering ---
-        st.subheader("Price & Technical Indicators")
+        st.header(f"📈 - Technical & Fundamental Evolution")
 
-        # Apply Date Filtering to the analyzed_df using the sidebar date inputs
-        # Convert index of analyzed_df to date objects for comparison
-        analyzed_df_dates = analyzed_df.index.to_series().dt.date
+        # 1. Define the columns: 2/3 width for candlestick, 1/3 for vertical bar charts
+        col_evolution, col_candlestick = st.columns([1, 2])
 
-        chart_data = analyzed_df[
-            (analyzed_df_dates >= start_date) &
-            (analyzed_df_dates <= end_date)
-            ].copy()  # Use .copy() to avoid SettingWithCopyWarning
+        with col_candlestick:
+            st.subheader("Price History & Technical Indicators")
+            analyzed_df_dates = analyzed_df.index.to_series().dt.date
+            chart_data = analyzed_df[(analyzed_df_dates >= start_date) & (analyzed_df_dates <= end_date)].copy()
 
-        if chart_data.empty:
-            st.warning(f"No data available in the selected date range: {start_date} to {end_date}.")
-        else:
-            # Use the filtered data for the plot
-            fig = plot_candlestick_chart(chart_data, selected_ticker)
-            st.plotly_chart(fig, use_container_width=True, height=600)
+            if chart_data.empty:
+                st.warning(f"No data available in the selected date range: {start_date} to {end_date}.")
+            else:
+                fig = plot_candlestick_chart(chart_data, selected_ticker_yf)
+                st.plotly_chart(fig, use_container_width=True, height=650)
 
-        # --- Data Table (Technical Indicators) with Date Formatting ---
-        st.subheader("Technical Data Snippet")
-        display_cols = ['close', 'Daily_Return', 'EMA_20', 'EMA_50', 'EMA_200']
+        with col_evolution:
+            st.subheader("Yearly Evolution")
+            fig_evolution = plot_evolution_bar_chart(evolution_df, selected_ticker_yf)
 
-        # Prepare the DataFrame for display
-        df_display = analyzed_df[display_cols].tail(10).copy()
-
-        # Fix Date Format: Convert index to date-only string for display
-        df_display.index = df_display.index.strftime('%Y-%m-%d')
-        df_display.index.name = 'date'
-
-        st.dataframe(
-            df_display.style.format({
-                'close': "{:.2f}",
-                'Daily_Return': "{:.2%}",
-                'EMA_20': "{:.2f}",
-                'EMA_50': "{:.2f}",
-                'EMA_200': "{:.2f}"
-            })
-            # The background_gradient requires 'matplotlib' to be installed.
-            # Please run 'pip install matplotlib' in your environment.
-            ,
-            use_container_width=True
-        )
+            # The height is set to match the candlestick chart height (650)
+            st.plotly_chart(fig_evolution, use_container_width=True, height=650)
 
 # --- 3. Comparison Analysis Tab ---
-
 with tab_comp:
-    if comparison_tickers:
-        st.header(f"Comparative Performance Over {comparison_period} Days")
+    if comparison_tickers_yf:
+        tickers_to_compare_yf = comparison_tickers_yf + [selected_ticker_yf]
+        comparison_summary_df = get_comparison_performance_data(tickers_to_compare_yf, comparison_period)
+        comparison_df_hist = get_normalized_comparison(tickers_to_compare_yf, comparison_period)
 
-        # Use the YF format tickers for fetching data
-        tickers_to_compare_yf = comparison_tickers + [selected_ticker]
-        comparison_df = get_normalized_comparison(tickers_to_compare_yf, comparison_period)
-
-        if comparison_df.empty:
-            st.warning("No data available for the selected tickers/period.")
+        if comparison_summary_df.empty and comparison_df_hist.empty:
+            st.warning("No performance data available for the selected tickers.")
         else:
-            fig_comp = plot_comparison_chart(comparison_df)
-            st.plotly_chart(fig_comp, use_container_width=True, height=600)
-
-            # Performance Summary Table
-            st.subheader("Performance Summary")
-
-            summary_data = []
-            for ticker in comparison_df.columns:
-                final_index = comparison_df[ticker].iloc[-1]
-                total_return = (final_index / 100.0) - 1.0
-                summary_data.append({
-                    "Ticker": ticker,
-                    f"Return over {comparison_period} days": total_return
-                })
-
-            summary_df = pd.DataFrame(summary_data).set_index("Ticker")
-
-            st.dataframe(
-                summary_df.style.format({
-                    f"Return over {comparison_period} days": "{:.2%}"
-                }).background_gradient(cmap='RdYlGn', subset=[f"Return over {comparison_period} days"]),
-                use_container_width=True
-            )
+            st.header(f"Comparative Performance Over {comparison_period} Trading Days")
+            col_historical, col_force = st.columns(2)
+            with col_historical:
+                st.subheader("Historical Normalized Performance")
+                st.markdown("Price action comparison, normalized to 100.")
+                if not comparison_df_hist.empty:
+                    fig_comp_hist = plot_comparison_chart(comparison_df_hist)
+                    st.plotly_chart(fig_comp_hist, use_container_width=True, height=550)
+                else:
+                    st.info("No historical data to plot.")
+            with col_force:
+                st.subheader("Risk, Return, and Dividend")
+                st.markdown("Volatility (Y) vs. Return (X) with Yield (Size/Color).")
+                if not comparison_summary_df.empty:
+                    fig_comp_force = plot_force_comparison_chart(comparison_summary_df)
+                    st.plotly_chart(fig_comp_force, use_container_width=True, height=550)
+                else:
+                    st.info("No summary data to plot.")
     else:
         st.info("Select at least one other ticker in the sidebar to run a comparison analysis.")
