@@ -1,4 +1,0 @@
-analysis
-charts
-database
-fetcher

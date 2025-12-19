@@ -176,8 +176,7 @@ def plot_force_comparison_chart(df: pd.DataFrame):
     fig.update_layout(
         title="Risk vs. Return with Dividend Yield Bubble Size",
         xaxis={'tickformat': '.0%', 'zeroline': True, 'zerolinecolor': 'gray', 'zerolinewidth': 1},
-        yaxis={'tickformat': '.0%', 'zeroline': True, 'zerolinecolor': 'gray', 'zerolinewidth': 1,
-               'autorange': "reversed"},  # Reversed Y-axis makes Low Volatility (good) be at the bottom
+        yaxis={'tickformat': '.0%', 'zeroline': True, 'zerolinecolor': 'gray', 'zerolinewidth': 1},
         template='plotly_white'
     )
 
@@ -273,4 +272,35 @@ def plot_evolution_bar_chart(df: pd.DataFrame, ticker_id: str) -> go.Figure:
     # Adjust subplot title size
     fig.for_each_annotation(lambda a: a.update(font=dict(size=14)))
 
+    return fig
+
+
+def plot_sector_risk_pie(df: pd.DataFrame):
+    """Visualizes risk by sector. Robust against missing 'icb_sector' column."""
+
+    # Safety: If column is missing, create a dummy one so the app doesn't crash
+    if 'icb_sector' not in df.columns:
+        df['icb_sector'] = 'Unknown'
+
+    # Fill NaN sectors
+    df['icb_sector'] = df['icb_sector'].fillna('Unknown')
+
+    # Use marginal_risk if available, otherwise use current_value for weights
+    weight_col = 'marginal_risk' if 'marginal_risk' in df.columns else 'current_value'
+
+    sector_data = df.groupby('icb_sector')[weight_col].sum().reset_index()
+
+    # Remove rows where weight is 0 to keep chart clean
+    sector_data = sector_data[sector_data[weight_col] > 0]
+
+    fig = px.pie(
+        sector_data,
+        values=weight_col,
+        names='icb_sector',
+        hole=0.4,
+        title=f"Portfolio Distribution by Sector ({'Risk' if weight_col == 'marginal_risk' else 'Value'})",
+        color_discrete_sequence=px.colors.qualitative.Pastel
+    )
+
+    fig.update_layout(margin=dict(t=40, b=0, l=0, r=0))
     return fig

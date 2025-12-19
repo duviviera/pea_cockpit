@@ -10,3 +10,6 @@ data/
 
 # Streamlit specifics
 .streamlit/
+
+#egg-info
+/src/pea_cockpit.egg-info/

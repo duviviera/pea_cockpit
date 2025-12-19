@@ -23,6 +23,7 @@ dependencies = [
     "beautifulsoup4",
     "lxml",
     "matplotlib>=3.10.8",
+    "python-calamine>=0.6.1",
 ]
 
 [tool.uv]

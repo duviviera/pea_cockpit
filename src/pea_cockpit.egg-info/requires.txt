@@ -1,8 +1,0 @@
-streamlit
-pandas
-duckdb
-yfinance
-plotly
-beautifulsoup4
-lxml
-matplotlib>=3.10.8

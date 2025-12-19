@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import datetime
-from src.database import get_all_ticker_ids, get_historical_prices_data, get_ticker_metadata
+from src.database import get_all_ticker_ids, get_historical_prices_data, get_ticker_metadata, get_sector_peers
 from src.analysis import (
     calculate_time_series_indicators,
     calculate_ytd_return,
@@ -27,6 +27,8 @@ def clean_ticker_id(ticker_id: str) -> str:
 
 def get_yf_ticker_id(clean_id: str) -> str:
     if '.' not in clean_id and clean_id.isalpha():
+        if clean_id in ['MT']:
+            return f"{clean_id}.AS"
         return f"{clean_id}.PA"
     return clean_id
 
@@ -50,18 +52,22 @@ with st.sidebar:
     st.header("Analysis Controls")
     selected_ticker_clean = st.selectbox("Select Primary Ticker", options=all_tickers_clean,
                                          index=all_tickers_clean.index(default_clean_ticker))
-    comparison_options = [t for t in all_tickers_clean if t != selected_ticker_clean]
-    comparison_tickers_clean = st.multiselect("Select Tickers for Comparison", options=comparison_options,
-                                              default=comparison_options[0] if comparison_options else [])
-    comparison_period = st.slider("Comparison Period (Trading Days)", min_value=90, max_value=365, value=252, step=30)
-    st.markdown("---")
-    st.header("Chart Period Selection")
+    st.text("Chart Period Selection")
     default_start_date = max_date - datetime.timedelta(days=365)
     start_date = st.date_input("Start Date", value=default_start_date, max_value=max_date)
     end_date = st.date_input("End Date", value=max_date, min_value=start_date, max_value=max_date)
     if start_date > end_date:
         st.error("Error: Start date cannot be after end date.")
         st.stop()
+    st.markdown("---")
+
+    # Get suggested peers
+    suggested_peers = [clean_ticker_id(t) for t in get_sector_peers(get_yf_ticker_id(selected_ticker_clean))]
+
+    comparison_options = [t for t in all_tickers_clean if t != selected_ticker_clean]
+    comparison_tickers_clean = st.multiselect("Select Tickers for Comparison", options=comparison_options,
+                                              default=suggested_peers)
+    comparison_period = st.slider("Comparison Period (Trading Days)", min_value=90, max_value=365, value=252, step=30)
     st.markdown("---")
     st.info("Use the **⚙️ Data Management** page to load new tickers.")
 
